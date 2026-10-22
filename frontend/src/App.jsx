@@ -1,4 +1,4 @@
-import {useCallback,useEffect,useState} from "react";
+import {useCallback,useEffect,useRef,useState} from "react";
 import "./app.css";
 const sid=localStorage.getItem("sid")||(()=>{const v=(crypto.randomUUID?crypto.randomUUID():String(Math.random()).slice(2)+"abcdefgh");localStorage.setItem("sid",v);return v})();
 async function api(path,{json,body,method}={}){
@@ -10,17 +10,21 @@ const LAB={critical:"Critical",watch:"Watch",healthy:"Healthy",unscored:"Not sco
 const Pill=({s,t})=><span className={"pill p-"+CLS[s]}>{t||LAB[s]}</span>;
 const f2=x=>(+x).toFixed(2);
 function useLoad(path){const [d,setD]=useState(null),[e,setE]=useState(null);
-  const load=useCallback(()=>{api(path).then(x=>{setD(x);setE(null)}).catch(x=>setE(x.message))},[path]);
-  useEffect(()=>{setD(null);load()},[load]);return [d,e,load]}
+  const version=useRef(0),currentPath=useRef(path);currentPath.current=path;
+  const load=useCallback(()=>{const n=++version.current,current=()=>n===version.current&&currentPath.current===path;
+    api(path).then(x=>{if(current()){setD(x);setE(null)}}).catch(x=>{if(current())setE(x.message)})},[path]);
+  useEffect(()=>{setD(null);setE(null);load();return()=>{version.current++}},[load]);return [d,e,load]}
 const Wait=({d,e,children})=>e?<div className="err" role="alert">{e}</div>:d===null?<p className="mute">Loading…</p>:children;
 const Kpi=({l,v,s,na})=><div className="card kpi"><span>{l}</span><b className={na?"na":""}>{v}</b><small>{s}</small></div>;
 
-function Chart({s}){const v=s.points.map(p=>p.v),hi=s.baseline+3*s.std,lo=Math.min(...v,s.baseline)-s.std,up=Math.max(...v,hi)+s.std,w=560,h=190,
+function Chart({s}){const v=s.points.map(p=>p.v),hi=s.baseline+3*s.std,lower=s.baseline-3*s.std,lo=Math.min(...v,lower)-s.std,up=Math.max(...v,hi)+s.std,w=560,h=190,
   X=i=>34+i*(w-44)/Math.max(1,v.length-1),Y=y=>h-24-(y-lo)/(up-lo)*(h-40);
   return <svg viewBox={`0 0 ${w} ${h}`} width="100%" role="img" aria-label="Sensor history">
     <line x1="34" x2={w-10} y1={Y(s.baseline)} y2={Y(s.baseline)} stroke="var(--mute)" strokeDasharray="3 4"/>
     <line x1="34" x2={w-10} y1={Y(hi)} y2={Y(hi)} stroke="var(--red)" strokeDasharray="5 4"/>
     <text x={w-12} y={Y(hi)-4} textAnchor="end" fontSize="11" fill="var(--red)">Critical threshold (baseline + 3σ)</text>
+    <line x1="34" x2={w-10} y1={Y(lower)} y2={Y(lower)} stroke="var(--red)" strokeDasharray="5 4"/>
+    <text x={w-12} y={Y(lower)-4} textAnchor="end" fontSize="11" fill="var(--red)">Critical threshold (baseline − 3σ)</text>
     <text x={w-12} y={Y(s.baseline)-4} textAnchor="end" fontSize="11" fill="var(--mute)">Baseline mean</text>
     <polyline fill="none" stroke="var(--acc)" strokeWidth="2.2" points={v.map((y,i)=>X(i)+","+Y(y)).join(" ")}/>
     <text x="34" y={h-6} fontSize="11" fill="var(--mute)">{s.points[0].t}</text><text x={w-10} y={h-6} textAnchor="end" fontSize="11" fill="var(--mute)">{s.points.at(-1).t}</text></svg>}
@@ -42,20 +46,20 @@ function Dataset({state,done}){
     <h2>Preview (first 5 rows)</h2><div className="scroll"><table><thead><tr>{p.columns.map(c=><th key={c}>{c}</th>)}</tr></thead><tbody>{p.preview.map((r,i)=><tr key={i}>{p.columns.map(c=><td key={c}>{String(r[c]??"")}</td>)}</tr>)}</tbody></table></div>
     <p><button className="btn pri" disabled={busy} onClick={check}>Check data</button> <button className="btn" onClick={()=>setStage("upload")}>Cancel</button></p></div></>}
   if(stage==="check"&&q)return <><h1>Check data</h1><p className="lead">Review before anything is processed</p><Steps n={2}/><Err/>
-    <div className="grid g5"><Kpi l="Rows" v={q.rows} s="Total data rows"/><Kpi l="Missing values" v={q.missing_pct+"%"} s={q.missing+" empty cells. Skipped, not invented"}/><Kpi l="Duplicate rows" v={q.duplicates} s="Removed before analysis"/><Kpi l="Invalid timestamps" v={q.bad_timestamps} s="Excluded from analysis"/><Kpi l="Extreme outliers" v={q.outliers} s="Over 4σ from the column mean. Kept"/></div>
+    <div className="grid g5"><Kpi l="Rows" v={q.rows} s="Total data rows"/><Kpi l="Missing / invalid values" v={q.missing_pct+"%"} s={q.missing+" empty cells or non-numeric mapped sensor values"}/><Kpi l="Duplicate rows" v={q.duplicates} s="Removed before analysis"/><Kpi l="Invalid timestamps" v={q.bad_timestamps} s="Excluded from analysis"/><Kpi l="Extreme outliers" v={q.outliers} s="Over 4σ from the column mean. Kept"/></div>
     <p><button className="btn pri" disabled={busy} onClick={run}>{busy?"Processing…":"Process and unlock"}</button> <button className="btn" onClick={()=>setStage("map")}>Back</button></p></>;
   if(state.unlocked){const d=state.dataset;return <><h1>Dataset</h1><p className="lead">The active dataset drives every page</p><Err/><div className="card"><h2>{d.name}</h2>
     <p>{d.quality.rows} rows · {d.machines} machines · {d.mapping.sensors.length} sensors · failure column: {d.mapping.failure||"none"}</p>
-    <p className="mute">Removed before analysis: {d.quality.duplicates} duplicate row(s) and {d.quality.bad_timestamps} row(s) with unreadable timestamps. {d.quality.missing} empty value(s) skipped.</p>
+    <p className="mute">Quality checks found {d.quality.duplicates} duplicate row(s), {d.quality.bad_timestamps} unreadable timestamp(s), and {d.quality.missing} missing or invalid cells. These counts may overlap.</p>
     <File label="Replace dataset"/> <button className="btn" disabled={busy} onClick={clear}>Clear dataset</button></div></>}
   return <><h1>Upload your equipment data</h1><p className="lead">Everything stays locked until your file passes validation.</p><Steps n={0}/><Err/>
     <div className="drop"><b>Upload a CSV or Excel file</b><p className="mute">One row per reading. Needed: a timestamp, an equipment ID and at least one numeric sensor column. Optional: a failure flag (0/1).</p><File label={busy?"Reading…":"Choose file"} pri/></div></>}
 
-function Overview(){const [o,e]=useLoad("/overview"),[eq]=useLoad("/equipment"),[q,setQ]=useState(""),[so,setSo]=useState("risk");
-  return <Wait d={o&&eq} e={e}>{o&&eq&&(()=>{const k=o.kpis,h=k.health;let L=eq.filter(a=>a.id.toLowerCase().includes(q.toLowerCase()));if(so==="id")L=[...L].sort((a,b)=>a.id.localeCompare(b.id));
+function Overview(){const [o,e]=useLoad("/overview"),[eq,e2]=useLoad("/equipment"),[q,setQ]=useState(""),[so,setSo]=useState("risk");
+  return <Wait d={o&&eq} e={e||e2}>{o&&eq&&(()=>{const k=o.kpis,h=k.health;let L=eq.filter(a=>a.id.toLowerCase().includes(q.toLowerCase()));if(so==="id")L=[...L].sort((a,b)=>a.id.localeCompare(b.id));
     return <><h1>Overview</h1><p className="lead">{o.dataset}</p><div className="grid g5">
     <Kpi l="Equipment monitored" v={k.equipment.value} s={k.equipment.definition}/>
-    <Kpi l="Health (critical / watch / healthy)" v={<><span style={{color:COL.critical}}>{h.critical}</span> / <span style={{color:COL.watch}}>{h.watch}</span> / <span style={{color:COL.healthy}}>{h.healthy}</span></>} s={h.definition}/>
+    <Kpi l="Health (critical / watch / healthy / not scored)" v={<><span style={{color:COL.critical}}>{h.critical}</span> / <span style={{color:COL.watch}}>{h.watch}</span> / <span style={{color:COL.healthy}}>{h.healthy}</span> / <span style={{color:COL.unscored}}>{h.unscored}</span></>} s={h.definition}/>
     <Kpi l="Observed failures" v={k.failures.available?k.failures.value:"Insufficient data"} s={k.failures.available?`${k.failures.rate_pct}% of records. ${k.failures.definition}`:k.failures.reason} na={!k.failures.available}/>
     <Kpi l="Open work orders" v={k.open_work_orders.value} s={k.open_work_orders.definition}/>
     <Kpi l="Remaining useful life" v="Insufficient data" s={k.remaining_useful_life.reason} na/></div>
@@ -67,7 +71,7 @@ function Equipment(){const [list,e]=useLoad("/equipment"),[id,setId]=useState(nu
   return <Wait d={list} e={e}>{list&&<><h1>Equipment Monitor</h1><p className="lead">Pick a machine to see the evidence behind its status</p>
     <div className="row"><div style={{maxWidth:260}}><label htmlFor="as">Equipment</label><select id="as" value={sel} onChange={e=>{setId(e.target.value);setSn(null)}}>{list.map(x=><option key={x.id}>{x.id}</option>)}</select></div></div>
     <Wait d={a&&a.sensors?a:null} e={e2}>{a&&a.sensors&&(()=>{const ns=Object.keys(a.sensors),n=ns.includes(sn)?sn:a.worst||ns[0];
-    return !ns.length?<div className="card">Not enough readings to score this machine (at least 10 per sensor are needed).</div>:<div className="grid g2"><div className="card"><h2>{n}</h2><p><Pill s={a.status}/> {a.health}% health</p><p>{ns.map(k=><button key={k} className={"btn sm "+(k===n?"pri":"")} style={{marginRight:6}} onClick={()=>setSn(k)}>{k}</button>)}</p><Chart s={a.sensors[n]}/></div>
+    return !ns.length?<div className="card">Not enough readings to score this machine (at least 10 per sensor are needed).</div>:<div className="grid g2"><div className="card"><h2>{n}</h2><p><Pill s={a.status}/> {a.health}% health</p><p>{ns.map(k=><button key={k} aria-pressed={k===n} className={"btn sm "+(k===n?"pri":"")} style={{marginRight:6}} onClick={()=>setSn(k)}>{k}</button>)}</p><Chart s={a.sensors[n]}/></div>
     <div className="card scroll"><h2>Evidence</h2><table><thead><tr><th>Sensor</th><th>Recent</th><th>Baseline</th><th>Shift</th></tr></thead><tbody>{ns.map(k=>{const x=a.sensors[k];return <tr key={k}><td>{k}</td><td>{f2(x.recent)}</td><td>{f2(x.baseline)}</td><td><Pill s={x.status} t={(x.z>0?"+":"")+f2(x.z)+" σ"}/></td></tr>})}</tbody></table>
     <p className="mute">Recent = mean of the last 3 readings. Baseline = mean of the first 60% of this machine's history. This is a statistical rule, not a trained model, and it does not predict a failure date.</p></div></div>})()}</Wait></>}</Wait>}
 

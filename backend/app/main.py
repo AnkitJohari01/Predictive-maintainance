@@ -1,5 +1,7 @@
 import json, os, sqlite3, uuid
-from datetime import datetime, timezone
+import numpy as np
+from datetime import date, datetime, timezone
+from typing import Literal
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel
 from . import analytics as A
@@ -42,7 +44,9 @@ class AlertPatch(BaseModel):
 class WOIn(BaseModel):
     title: str; asset: str | None = None
 class WOPatch(BaseModel):
-    assignee: str | None = None; due: str | None = None; status: str | None = None
+    assignee: str | None = None
+    due: date | Literal[""] | None = None
+    status: Literal["Open", "In progress", "Done"] | None = None
 
 
 @app.get("/api/state")
@@ -78,10 +82,12 @@ def check(m: Mapping, s=Depends(sid)):
 def process(m: Mapping, s=Depends(sid)):
     p, mp = pending(s), m.model_dump(); errs = A.blockers(p["df"], mp)
     if errs: raise HTTPException(422, errs)
-    result, d = A.analyse(p["df"], mp)
+    try: result, d = A.analyse(p["df"], mp)
+    except ValueError as e: raise HTTPException(422, str(e))
     if not result["assets"]: raise HTTPException(422, ["No usable rows remain after cleaning."])
+    quality = A.quality(p["df"], mp)
     wipe(s)  # invalidate everything derived from the previous dataset
-    SESS[s] = {"active": {"id": uuid.uuid4().hex[:12], "name": p["name"], "map": mp, "quality": A.quality(p["df"], mp), "result": result, "clean": d, "model": None}}
+    SESS[s] = {"active": {"id": uuid.uuid4().hex[:12], "name": p["name"], "map": mp, "quality": quality, "result": result, "clean": d, "model": None}}
     return {"quality": SESS[s]["active"]["quality"]}
 
 
@@ -146,15 +152,20 @@ def wos(s=Depends(sid)): return q("select * from work_orders where sid=? and ds=
 
 @app.post("/api/workorders")
 def wo_new(p: WOIn, s=Depends(sid)):
-    a = active(s); return {"id": q("insert into work_orders(sid,ds,title,asset) values(?,?,?,?)", (s, a["id"], p.title, p.asset))}
+    a = active(s); title = p.title.strip()
+    if not title: raise HTTPException(422, "A work order title is required.")
+    if p.asset is not None and p.asset not in {x["id"] for x in a["result"]["assets"]}:
+        raise HTTPException(422, "Choose equipment from the active dataset.")
+    return {"id": q("insert into work_orders(sid,ds,title,asset) values(?,?,?,?)", (s, a["id"], title, p.asset))}
 
 
 @app.patch("/api/workorders/{wid}")
 def wo_patch(wid: int, p: WOPatch, s=Depends(sid)):
     a = active(s)
-    if p.status and p.status not in ("Open", "In progress", "Done"): raise HTTPException(422, "Invalid status.")
     if not q("select id from work_orders where id=? and sid=? and ds=?", (wid, s, a["id"]), many=True): raise HTTPException(404, "Unknown work order.")
-    for k, v in p.model_dump(exclude_none=True).items(): q(f"update work_orders set {k}=? where id=?", (v, wid))
+    fields = p.model_dump(exclude_none=True, mode="json")
+    if fields:
+        q(f"update work_orders set {', '.join(k+'=?' for k in fields)} where id=? and sid=? and ds=?", (*fields.values(), wid, s, a["id"]))
     return {"id": wid}
 
 
@@ -167,10 +178,16 @@ def model_get(s=Depends(sid)):
 def model_train(s=Depends(sid)):
     from sklearn.ensemble import IsolationForest, RandomForestClassifier
     from sklearn.metrics import confusion_matrix, precision_score, recall_score, roc_auc_score
-    a = active(s); d, m = a["clean"].copy(), a["map"]; feats = list(m["sensors"])
+    a = active(s); d, m = a["clean"], a["map"]
+    X = d[m["sensors"]].copy()
     for c in m["sensors"]:
-        d[c + "_avg3"] = d.groupby(m["id"])[c].transform(lambda x: x.rolling(3, min_periods=1).mean()); feats.append(c + "_avg3")
-    X = d[feats].fillna(d[feats].median()).fillna(0); cut = int(len(d) * .7)  # time-ordered split: train on the past, test on the future
+        name = c + "_avg3"
+        while name in X.columns: name += "_avg3"
+        X[name] = d.groupby(m["id"])[c].transform(lambda x: x.rolling(3, min_periods=1).mean())
+    cut = int(len(d) * .7)  # Learn imputation only from the earlier training rows.
+    X = X.fillna(X.iloc[:cut].median()).fillna(0); feats = list(X.columns)
+    if not np.isfinite(X.to_numpy()).all() or (X.abs() > np.finfo(np.float32).max).any().any():
+        raise HTTPException(422, "Sensor features exceed the numeric range supported by the model. Check units and extreme readings.")
     info = {"trained": True, "version": uuid.uuid4().hex[:8], "trained_at": datetime.now(timezone.utc).isoformat(), "dataset": a["name"], "train_rows": cut, "test_rows": len(d) - cut}
     if m.get("failure"):
         y = d[m["failure"]].to_numpy()

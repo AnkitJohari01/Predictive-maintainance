@@ -1,7 +1,8 @@
 import {test,expect} from "@playwright/test";
 const nav=(page,n)=>page.getByRole("navigation").getByRole("button",{name:n,exact:true});
 async function load(page,file="e2e/sample.csv"){await page.goto("/");await page.locator("input[type=file]").setInputFiles(file);
-  await page.getByRole("button",{name:"Check data"}).click();await page.getByRole("button",{name:"Process and unlock"}).click();}
+  await page.getByRole("button",{name:"Check data"}).click();await page.getByRole("button",{name:"Process and unlock"}).click();
+  await expect(page.getByRole("heading",{name:"Overview",exact:true})).toBeVisible();}
 test("starts locked with no business data",async({page})=>{await page.goto("/");
   await expect(page.getByRole("heading",{name:"Upload your equipment data"})).toBeVisible();
   for(const n of ["Overview","Equipment Monitor","Alerts","Maintenance","ML Monitor"])await expect(nav(page,n)).toBeDisabled();});

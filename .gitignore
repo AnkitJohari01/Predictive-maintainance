@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+.venv/
+node_modules/
+dist/
+test-results/
+playwright-report/
+mlruns/
+*.db
+*.sqlite
+*.sqlite3
