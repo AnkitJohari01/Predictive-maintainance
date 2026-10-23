@@ -1,6 +1,6 @@
 # SentinelOps
 
-Dataset-first equipment condition analysis and maintenance workflow application. Existing FastAPI, React/Vite, SQLite, baseline analytics, alert decisions, work orders, model training and optional MLflow integration are retained.
+Dataset-first equipment condition analysis and maintenance decision platform. The approved client workspace includes twelve sections for data setup, condition evidence, operational preparation, knowledge and measured outcomes. Existing FastAPI, React/Vite, SQLite, baseline analytics, alert decisions, work orders, model training and optional MLflow integration are retained.
 
 ## Start locally
 
@@ -43,6 +43,14 @@ A failed replacement keeps the active dataset, work orders, alert decisions and 
 
 The repository includes `backend/scripts/make_sample.py` and `frontend/e2e/sample.csv` for explicit testing only. Screenshot analytics in `docs/previews` come from uploading that test fixture, not from a customer dataset.
 
+## Operational workspace
+
+Upload a complete JSON bundle to process telemetry and maintenance context atomically, or add CSV / Excel / JSON context tables after the normal telemetry workflow. Every operational result uses your data. See [the full context contract](docs/CONTEXT_SCHEMA.md) for fields, validation, sequencing and examples.
+
+The Control tower action desk links readings to an accountable owner, inspection findings, resource blockers, approval and verification. Case material reservations and shared crew proposals are transactional. Changing findings invalidates old verification and reviews. Approved proposals link a work order; verified closure resolves alerts without overwriting telemetry. Work packs and CSV reviews are exportable.
+
+Parts views show imported stock and case allocations. Asset intelligence joins uploaded dependencies and changes. What-if comparisons evaluate explicit preparation and capacity assumptions without changing operational records. Knowledge retrieves uploaded source excerpts, IDs and revisions. Reliability uses recorded events, matched exposure and actual completed-work costs; missing evidence stays unavailable.
+
 ## Analytics and model interpretation
 
 Each equipment/sensor baseline uses the first 60% of its chronological readings. Recent value is the last three valid readings' mean. Standard deviation is floored at the larger of 1% of the baseline mean magnitude and 1e-6 to handle constant signals. A shift of at least 1.5 standard deviations in either direction is Watch; at least 3 is Critical.
@@ -72,8 +80,8 @@ Playwright automatically uses the project virtual environment when present. Over
 This update improves correctness and UI quality but is not a complete production infrastructure rollout:
 
 - There is no authentication or authorization. The anonymous `X-Session` token is browser state, not a user identity or security boundary. Add authenticated access before exposing sensitive data.
-- Uploaded data and model results are held in one server process's memory and disappear on restart. Use one backend worker for this version; multi-worker/multi-instance use needs shared durable dataset/session storage and coordinated mutations.
-- SQLite retains work orders and alert decisions, scoped to a transient dataset. Configure `SENTINELOPS_DB` for its path. A production retention/backup policy, quotas, expiry and upload scanning are not implemented.
+- Active data, analytics and model results now persist in SQLite along with context and decisions. Pending unprocessed uploads remain in process memory. Set `SENTINELOPS_DB` to a persistent file path, use a single instance and back it up. Ephemeral hosting disks do not retain files across redeployment; shared multi-instance storage is not implemented.
+- SQLite retains case investigations, audit, stock reservations, shared crew approvals, work orders and alert decisions, scoped to the active dataset/session. A production retention/backup policy, quotas, expiry and upload scanning are not implemented.
 - The baseline is statistical, sensitive to operating regimes and sampling. Models are evaluated against uploaded labels; neither is a certified maintenance safety system.
-- Remaining useful life, cost savings, parts inventory, production-aware scheduling, manual retrieval/RAG and drift monitoring were not implemented in the supplied app and are not fabricated here.
+- Parts readiness, shared crew feasibility, explicit production-capacity scenarios, uploaded reference retrieval and recorded reliability/cost reporting are implemented. Remaining useful life, causal cost savings, physical cascade simulation, global optimization, live CMMS/historian connectors, LLM RAG and drift monitoring are not implemented or fabricated.
 - Automated browser coverage uses Chromium. XLSX and CSV are exercised; the XLS reader dependency is included but a legacy XLS fixture is not covered. Optional MLflow service connectivity, load testing and production hosting have not been tested.
