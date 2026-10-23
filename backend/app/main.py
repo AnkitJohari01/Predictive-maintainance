@@ -1,11 +1,13 @@
 import json, os, sqlite3, uuid
+import pandas as pd
 from datetime import date, datetime, timezone
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field, field_validator
 from . import analytics as A
+from . import storage as S
 
 app = FastAPI(title="SentinelOps")
-SESS: dict = {}  # per-session state: {"pending": ..., "active": ...}. Datasets are isolated by X-Session id.
+SESS: dict = {}  # Unprocessed pending uploads only. Active datasets and workflows persist in SQLite.
 SCHEMA = """create table if not exists alert_status(sid text, ds text, key text, status text, primary key(sid, ds, key));
 create table if not exists work_orders(id integer primary key autoincrement, sid text, ds text, title text, asset text, assignee text default '', due text default '', status text default 'Open');"""
 MAX = lambda: int(os.environ.get("SENTINELOPS_MAX_MB", "50")) * 1048576
@@ -26,13 +28,15 @@ def sid(x_session: str = Header(None)):
 
 
 def active(s):
-    a = SESS.get(s, {}).get("active")
+    a = S.load_dataset(s)
     if not a: raise HTTPException(409, "No active dataset. Upload and process a dataset first.")
     return a
 
 
 def wipe(s):
     for t in ("alert_status", "work_orders"): q(f"delete from {t} where sid=?", (s,))
+    with S.transaction() as db:
+        db.execute("DELETE FROM workspaces WHERE sid=?", (s,))
 
 
 class Mapping(BaseModel):
@@ -52,9 +56,45 @@ class WOPatch(BaseModel):
     assignee: str | None = None; due: str | None = None; status: str | None = None
 
 
+@app.post("/api/bundles")
+async def bundle_upload(file: UploadFile = File(...), s=Depends(sid)):
+    from .workspace import Context, validate_context, event
+    from pydantic import ValidationError
+    SESS.setdefault(s, {}).pop("pending", None)
+    raw = await file.read(MAX()+1)
+    if len(raw) > MAX(): raise HTTPException(413, "Bundle is too large.")
+    if not (file.filename or "").lower().endswith(".json"): raise HTTPException(422, "A complete bundle must be JSON.")
+    try:
+        value = json.loads(raw)
+        if not isinstance(value, dict) or not isinstance(value.get("telemetry"), list) or not value["telemetry"] or any(not isinstance(r, dict) for r in value["telemetry"]):
+            raise ValueError("Bundle requires a non-empty telemetry array of records.")
+        if set(value)-set(Context.model_fields)-{"telemetry", "sensors", "mapping"}: raise ValueError("Bundle contains unrecognized sections.")
+        df = pd.DataFrame(value["telemetry"])
+        mp = value.get("mapping") or A.infer(df)
+        if "sensors" in value: mp["sensors"] = value["sensors"]
+        mp = Mapping.model_validate(mp).model_dump()
+        errs = A.blockers(df, mp)
+        if errs: raise HTTPException(422, errs)
+        result, clean = A.analyse(df, mp)
+        dataset = {"id": uuid.uuid4().hex[:12], "name": file.filename, "map": mp, "quality": A.quality(df, mp), "result": result, "clean": clean, "model": None}
+        ctx = validate_context(Context.model_validate({k: value[k] for k in Context.model_fields if k in value}).model_dump(), dataset)
+        workspace = S.empty_workspace(); workspace["context"] = ctx
+        event(workspace, "Complete bundle processed", file.filename)
+    except (ValueError, TypeError, KeyError, ValidationError, OverflowError) as exc:
+        raise HTTPException(422, "Bundle validation failed: "+str(exc)[:1500])
+    q("select 1")
+    with S.transaction() as db:
+        for table in ("alert_status", "work_orders", "workspaces"):
+            db.execute(f"DELETE FROM {table} WHERE sid=?", (s,))
+        S.save_dataset(s, dataset, db)
+        S.save_workspace(db, s, dataset["id"], workspace)
+    SESS.pop(s, None)
+    return {"processed": True, "quality": dataset["quality"]}
+
+
 @app.get("/api/state")
 def state(s=Depends(sid)):
-    a = SESS.get(s, {}).get("active")
+    a = S.load_dataset(s)
     return {"unlocked": bool(a), "dataset": a and {"name": a["name"], "quality": a["quality"], "mapping": a["map"], "machines": len(a["result"]["assets"])}}
 
 
@@ -91,14 +131,25 @@ def process(m: Mapping, s=Depends(sid)):
     except (ValueError, TypeError, OverflowError) as exc:
         raise HTTPException(422, "The selected data could not be processed. Check timestamps, equipment IDs and sensor values.") from exc
     if not result["assets"]: raise HTTPException(422, ["No usable rows remain after cleaning."])
-    wipe(s)  # invalidate everything derived from the previous dataset
-    SESS[s] = {"active": {"id": uuid.uuid4().hex[:12], "name": p["name"], "map": mp, "quality": A.quality(p["df"], mp), "result": result, "clean": d, "model": None}}
-    return {"quality": SESS[s]["active"]["quality"]}
+    dataset = {"id": uuid.uuid4().hex[:12], "name": p["name"], "map": mp, "quality": A.quality(p["df"], mp), "result": result, "clean": d, "model": None}
+    # Swap data and dependent state atomically after validation succeeds.
+    q("select 1")
+    with S.transaction() as db:
+        for table in ("alert_status", "work_orders", "workspaces"):
+            db.execute(f"DELETE FROM {table} WHERE sid=?", (s,))
+        S.save_dataset(s, dataset, db)
+    SESS.pop(s, None)
+    return {"quality": dataset["quality"]}
 
 
 @app.delete("/api/dataset")
 def clear(s=Depends(sid)):
-    SESS.pop(s, None); wipe(s); return {"cleared": True}
+    SESS.pop(s, None)
+    q("select 1")
+    with S.transaction() as db:
+        for table in ("alert_status", "work_orders", "workspaces", "datasets"):
+            db.execute(f"DELETE FROM {table} WHERE sid=?", (s,))
+    return {"cleared": True}
 
 
 def slim(a, points=False):
@@ -144,7 +195,23 @@ def alert_status(p: AlertPatch, s=Depends(sid)):
     a = active(s)
     if p.status not in ("Open", "Acknowledged", "Resolved"): raise HTTPException(422, "Status must be Open, Acknowledged or Resolved.")
     if p.key not in {x["key"] for x in a["result"]["alerts"]}: raise HTTPException(404, "Unknown alert.")
-    q("insert or replace into alert_status values(?,?,?,?)", (s, a["id"], p.key, p.status)); return {"key": p.key, "status": p.status}
+    with S.transaction() as db:
+        w = S.load_workspace(db, s, a["id"])
+        aid = next(x["asset"] for x in a["result"]["alerts"] if x["key"] == p.key)
+        if p.status == "Resolved" and w["context"]["assets"] and not w["cases"].get(aid, {}).get("closed"):
+            raise HTTPException(409, "Resolve through the case workspace after recording disposition, findings and verification evidence.")
+        record=w["cases"].get(aid)
+        if p.status != "Resolved" and record and record["closed"]:
+            record.update(closed=False,approved=False,scope_reviewed=False,production_reviewed=False,permit_reviewed=False,verification_value=None,verification_note="",verification_at="")
+            w["approvals"].pop(aid,None)
+            for alert in a["result"]["alerts"]:
+                if alert["asset"] == aid: db.execute("INSERT OR REPLACE INTO alert_status VALUES(?,?,?,?)",(s,a["id"],alert["key"],"Open"))
+            if record.get('work_order_id'): db.execute("UPDATE work_orders SET status='Open' WHERE id=? AND sid=? AND ds=?",(record['work_order_id'],s,a['id']))
+            from .workspace import event
+            event(w,"Case reopened via alert",aid)
+            S.save_workspace(db,s,a['id'],w)
+        db.execute("INSERT OR REPLACE INTO alert_status VALUES(?,?,?,?)",(s,a['id'],p.key,p.status))
+    return {"key":p.key,"status":p.status}
 
 
 @app.get("/api/maintenance/recommendations")
@@ -170,8 +237,17 @@ def wo_patch(wid: int, p: WOPatch, s=Depends(sid)):
     if p.due:
         try: date.fromisoformat(p.due)
         except ValueError: raise HTTPException(422, "Due date must be a valid date in YYYY-MM-DD format.")
-    if not q("select id from work_orders where id=? and sid=? and ds=?", (wid, s, a["id"]), many=True): raise HTTPException(404, "Unknown work order.")
-    for k, v in p.model_dump(exclude_none=True).items(): q(f"update work_orders set {k}=? where id=?", (v, wid))
+    with S.transaction() as db:
+        if not db.execute("SELECT id FROM work_orders WHERE id=? AND sid=? AND ds=?",(wid,s,a['id'])).fetchone(): raise HTTPException(404,"Unknown work order.")
+        w=S.load_workspace(db,s,a['id'])
+        linked=next((r for r in w['cases'].values() if r.get('work_order_id') == wid),None)
+        if linked and p.status == 'Done' and not linked['closed']:
+            raise HTTPException(409,"Verify and close the linked case before completing this work order.")
+        if linked and any(k in p.model_fields_set for k in ('assignee','due')):
+            raise HTTPException(409,"Edit ownership and planning through the linked case, then approve the proposal again.")
+        if linked and p.status and p.status != 'Done' and linked['closed']:
+            raise HTTPException(409,"Reopen the linked case before changing the completed work order.")
+        for k,v in p.model_dump(exclude_none=True).items(): db.execute(f"UPDATE work_orders SET {k}=? WHERE id=? AND sid=? AND ds=?",(v,wid,s,a['id']))
     return {"id": wid}
 
 
@@ -226,4 +302,10 @@ def model_train(s=Depends(sid)):
     except Exception as e:  # reported to the user, not hidden
         info["mlflow"] = f"not logged: {type(e).__name__}: {e}"
     info["drift"] = "Drift monitoring is not implemented yet."
-    a["model"] = info; return info
+    try: S.save_model(s, a["id"], info)
+    except ValueError as exc: raise HTTPException(409, str(exc))
+    return info
+
+
+from .workspace import install
+install(app, active, sid, q)

@@ -1,8 +1,47 @@
+# SentinelOps client workspace — change and test report
+
+23 October 2026 · Existing repository: AnkitJohari01/Predictive-maintainance · Feature branch: feature/sentinelops-client-workspace.
+
+## Implemented from the approved preview
+
+- Responsive horizontal navigation and light/dark/system appearance across twelve sections. Production starts empty; illustrative data is not loaded automatically.
+- Original CSV/Excel telemetry mapping, quality checks, statistical analytics, charts, alert decisions, work orders and chronological model training retained.
+- Complete JSON bundle imports and individually validated operational context tables. Failed replacements preserve active data and saved work.
+- SQLite persistence for datasets, model results, context, cases, reservations, approvals and audit; pending uploads remain temporary.
+- Daily action desk with accountable owner, evidence, readiness blockers and case handoff.
+- Case investigations, required production/scope/permit-prerequisite reviews, transactional material allocations, shared crew feasibility and linked work orders.
+- Earliest fitting shared-crew slot search at window start and booking ends; peak simultaneous capacity checked. No global optimization is claimed.
+- Verified case closure, related alert resolution and linked order completion. Changed findings clear old verification/reviews. Explicitly clearing a verification reading invalidates closure. Reopened alerts reopen the case.
+- Source-linked uploaded reference retrieval, dependency and change views, work-pack/CSV exports, deterministic preparation/production scenarios and actual event/exposure/cost reporting.
+- Missing evidence remains unavailable; scenario estimates do not become claimed savings or failure predictions.
+
+## Verification
+
+- Full backend suite: **70 pytest tests passed**. Includes all 46 existing tests plus persistence, complete-bundle validation, isolation, concurrent reservations, release/reopen, shared capacity and sequential slots, exposure integrity, verified closure, stale evidence, stale model writes, linked orders, slash-containing tags, scenario calculations and source retrieval.
+- Browser suite: **23 Playwright Chromium tests passed in 28.3 seconds**, covering original workflows plus complete context, persistent case decisions after reload, allocation conflicts, approval, verified outcomes, scenarios, sources, invalid replacement and responsive layouts. The final run includes immediate alert-status refresh after case closure.
+- Final backend run: **70 passed in 32.49 seconds**. Production Vite build succeeded. Local screenshots use uploaded test fixtures; no customer information is included.
+- One Python dependency deprecation warning (Starlette/AnyIO portal alias) and browser runner color-environment warnings; neither produced a test failure.
+- Independent read-only review identified stale verification, alert-write race, stale linked ownership, impossible exposure totals and missed sequential crew slots. Each issue was fixed; targeted failing regressions were observed before the fixes. Author also checked the final diff and rendered screens.
+
+## Operational boundaries
+
+Authentication/role authorization, live CMMS/historian integrations, physical cascading-failure models, calibrated future-failure forecasts, LLM RAG, multi-component job BOMs, warehouse consumption and procurement execution are not included. The retained X-Session browser token is not authenticated user identity. Use a trusted/private installation until proper authorization exists.
+
+SQLite must be stored on durable host storage and backed up. It survives process restart, not loss of an ephemeral hosting filesystem. This version targets a single application instance. No manual deployment or merge is part of this delivery; existing GitHub hosting integrations can independently create branch/PR previews.
+
+See `docs/CONTEXT_SCHEMA.md` for data fields, formulas, import ordering, exact action semantics and limits.
+
+---
+
+## Historical report from the prior release
+
+The following record describes the previous dataset-validation update, not the current persistence architecture.
+
 # SentinelOps change and test report
 
 Completed 23 October 2026 (Asia/Calcutta). Updated the application supplied in `sentinelops.zip` in place. No deployment, repository reset, or source-file deletion was performed. The original attached archive remains unchanged.
 
-## Changes delivered
+## Previous dataset-validation release
 
 | Area | Result |
 | --- | --- |
