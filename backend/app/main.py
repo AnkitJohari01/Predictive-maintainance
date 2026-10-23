@@ -1,7 +1,7 @@
 import json, os, sqlite3, uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from . import analytics as A
 
 app = FastAPI(title="SentinelOps")
@@ -36,11 +36,18 @@ def wipe(s):
 
 
 class Mapping(BaseModel):
-    timestamp: str; id: str; failure: str | None = None; sensors: list[str]
+    timestamp: str | None = None; id: str | None = None; failure: str | None = None; sensors: list[str]
 class AlertPatch(BaseModel):
     key: str; status: str
 class WOIn(BaseModel):
-    title: str; asset: str | None = None
+    title: str = Field(min_length=1, max_length=500)
+    asset: str | None = None
+
+    @field_validator("title")
+    @classmethod
+    def title_not_blank(cls, value):
+        if not value.strip(): raise ValueError("Work order title cannot be empty.")
+        return value.strip()
 class WOPatch(BaseModel):
     assignee: str | None = None; due: str | None = None; status: str | None = None
 
@@ -53,6 +60,7 @@ def state(s=Depends(sid)):
 
 @app.post("/api/datasets")
 async def upload(file: UploadFile = File(...), s=Depends(sid)):
+    SESS.setdefault(s, {}).pop("pending", None)
     raw = await file.read(MAX() + 1)
     if len(raw) > MAX(): raise HTTPException(413, "File is too large.")
     try: df = A.read_upload(file.filename or "", raw)
@@ -78,7 +86,10 @@ def check(m: Mapping, s=Depends(sid)):
 def process(m: Mapping, s=Depends(sid)):
     p, mp = pending(s), m.model_dump(); errs = A.blockers(p["df"], mp)
     if errs: raise HTTPException(422, errs)
-    result, d = A.analyse(p["df"], mp)
+    try:
+        result, d = A.analyse(p["df"], mp)
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise HTTPException(422, "The selected data could not be processed. Check timestamps, equipment IDs and sensor values.") from exc
     if not result["assets"]: raise HTTPException(422, ["No usable rows remain after cleaning."])
     wipe(s)  # invalidate everything derived from the previous dataset
     SESS[s] = {"active": {"id": uuid.uuid4().hex[:12], "name": p["name"], "map": mp, "quality": A.quality(p["df"], mp), "result": result, "clean": d, "model": None}}
@@ -107,14 +118,14 @@ def overview(s=Depends(sid)):
         "failures": ({"available": True, "value": tf, "rate_pct": round(100 * tf / a["result"]["records"], 2), "definition": "Rows flagged 1 in the failure column."} if fl else na("No failure column was mapped.")),
         "open_work_orders": {"value": sum(w["status"] != "Done" for w in wo), "definition": "Work orders created in this app. None are imported from the dataset."},
         "remaining_useful_life": na("Needs repeated run-to-failure histories. Not estimated from this file."),
-        "cost_exposure": na("No cost or production-impact columns exist.")}}
+        "cost_exposure": na("Cost and production impact inputs have no configured mapping.")}}
 
 
 @app.get("/api/equipment")
 def equipment(s=Depends(sid)): return [slim(x) for x in active(s)["result"]["assets"]]
 
 
-@app.get("/api/equipment/{aid}")
+@app.get("/api/equipment/{aid:path}")
 def equipment_one(aid: str, s=Depends(sid)):
     x = next((x for x in active(s)["result"]["assets"] if x["id"] == aid), None)
     if not x: raise HTTPException(404, "Unknown equipment.")
@@ -146,13 +157,19 @@ def wos(s=Depends(sid)): return q("select * from work_orders where sid=? and ds=
 
 @app.post("/api/workorders")
 def wo_new(p: WOIn, s=Depends(sid)):
-    a = active(s); return {"id": q("insert into work_orders(sid,ds,title,asset) values(?,?,?,?)", (s, a["id"], p.title, p.asset))}
+    a = active(s)
+    if p.asset is not None and p.asset not in {x["id"] for x in a["result"]["assets"]}:
+        raise HTTPException(422, "Choose equipment from the active dataset.")
+    return {"id": q("insert into work_orders(sid,ds,title,asset) values(?,?,?,?)", (s, a["id"], p.title, p.asset))}
 
 
 @app.patch("/api/workorders/{wid}")
 def wo_patch(wid: int, p: WOPatch, s=Depends(sid)):
     a = active(s)
-    if p.status and p.status not in ("Open", "In progress", "Done"): raise HTTPException(422, "Invalid status.")
+    if p.status is not None and p.status not in ("Open", "In progress", "Done"): raise HTTPException(422, "Invalid status.")
+    if p.due:
+        try: date.fromisoformat(p.due)
+        except ValueError: raise HTTPException(422, "Due date must be a valid date in YYYY-MM-DD format.")
     if not q("select id from work_orders where id=? and sid=? and ds=?", (wid, s, a["id"]), many=True): raise HTTPException(404, "Unknown work order.")
     for k, v in p.model_dump(exclude_none=True).items(): q(f"update work_orders set {k}=? where id=?", (v, wid))
     return {"id": wid}
@@ -165,13 +182,27 @@ def model_get(s=Depends(sid)):
 
 @app.post("/api/model/train")
 def model_train(s=Depends(sid)):
+    a = active(s)
     from sklearn.ensemble import IsolationForest, RandomForestClassifier
     from sklearn.metrics import confusion_matrix, precision_score, recall_score, roc_auc_score
-    a = active(s); d, m = a["clean"].copy(), a["map"]; feats = list(m["sensors"])
-    for c in m["sensors"]:
-        d[c + "_avg3"] = d.groupby(m["id"])[c].transform(lambda x: x.rolling(3, min_periods=1).mean()); feats.append(c + "_avg3")
-    X = d[feats].fillna(d[feats].median()).fillna(0); cut = int(len(d) * .7)  # time-ordered split: train on the past, test on the future
-    info = {"trained": True, "version": uuid.uuid4().hex[:8], "trained_at": datetime.now(timezone.utc).isoformat(), "dataset": a["name"], "train_rows": cut, "test_rows": len(d) - cut}
+    d, m = a["clean"].copy(), a["map"]
+    # Keep a whole timestamp on one side of the split; fit imputation on training rows only.
+    times = d[m["timestamp"]].drop_duplicates().tolist()
+    if len(times) < 2: raise HTTPException(422, "Training needs at least two distinct timestamps for time-ordered validation.")
+    boundary = times[max(1, int(len(times) * .7))]
+    cut = int((d[m["timestamp"]] < boundary).sum())
+    X = d[m["sensors"]].copy()
+    feats = list(m["sensors"])
+    for i, col in enumerate(m["sensors"]):
+        feature = f"Rolling mean 3: {col}"
+        while feature in X.columns: feature = "Derived " + feature
+        X[feature] = d.groupby(m["id"])[col].transform(lambda x: x.rolling(3, min_periods=1).mean())
+        feats.append(feature)
+    if X.iloc[:cut].notna().sum().sum() == 0:
+        raise HTTPException(422, "No usable sensor readings in the training period.")
+    X = X.fillna(X.iloc[:cut].median()).fillna(0)
+    info = {"trained": True, "version": uuid.uuid4().hex[:8], "trained_at": datetime.now(timezone.utc).isoformat(), "dataset": a["name"], "train_rows": cut, "test_rows": len(d) - cut,
+            "validation": "Earlier timestamps train; later timestamps test. Missing values use training-period medians. Metrics classify observed failure flags, not future failure dates."}
     if m.get("failure"):
         y = d[m["failure"]].to_numpy()
         if y[:cut].sum() < 3 or y[cut:].sum() < 1 or y[:cut].sum() == cut:
