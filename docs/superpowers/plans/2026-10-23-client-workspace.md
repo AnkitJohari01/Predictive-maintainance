@@ -58,7 +58,7 @@ Files: `frontend/src/App.jsx`, `frontend/src/Workspace.jsx`, `frontend/src/works
 
 - [x] Run full pytest, Playwright and production build. Review code/diff for security, regressions and metric correctness.
 - [x] Document data contracts, persistence, limits and actual checks in README/change report.
-- [ ] Package an updated ZIP; commit and push `feature/sentinelops-client-workspace`; create/attach a reviewable PR if access permits.
+- [x] Package an updated ZIP; commit and push `feature/sentinelops-client-workspace`; create/attach a reviewable PR if access permits.
 
 ## Execution Ledger
 
@@ -72,4 +72,6 @@ Files: `frontend/src/App.jsx`, `frontend/src/Workspace.jsx`, `frontend/src/works
 - Final review: author screenshot pass found a stale alert table after case closure; added a browser assertion and keyed the alert component to workflow revision.
 - Ruling: no optional GitHub Actions workflow added in this change; test commands, reports and existing hosting integrations retained.
 - Ruling: retain single mapped part per asset case, record reservations without claiming stock consumption, and document this boundary.
-- Final verification: 70 pytest tests passed (32.49 seconds), 23 Playwright tests passed (28.3 seconds), and the production Vite build succeeded. Delivery is pending commit, ZIP, push and PR creation.
+- Final verification: 70 pytest tests passed (32.49 seconds), 23 Playwright tests passed (28.3 seconds), and the production Vite build succeeded.
+- Delivered implementation commit `64395b6` on `feature/sentinelops-client-workspace`. Opened and attached PR https://github.com/AnkitJohari01/Predictive-maintainance/pull/3. The connector denied PR creation (403); the signed-in GitHub CLI succeeded.
+- Created `sentinelops-client-workspace.zip` from tracked source and documentation, excluding local dependencies, databases and build outputs. Regenerate the archive after this delivery-note commit so it matches the final branch. No merge or manual deployment performed.
